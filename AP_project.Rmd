@@ -1,0 +1,510 @@
+---
+title: "AP Project"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+To start off load all the libraries used in the project so notifications of them being loaded do not intervene with the output. In first lines of chuncks where the libraries are used they are commented out so one can see wher non-standard functions come from.
+
+```{r, message=FALSE, warning=FALSE}
+rm(list=ls())
+library(rtsdata)
+library(quadprog)
+library(ggplot2)
+library(xlsx)
+```
+To highlight assumptions they are stated before the code chunks in [[]]
+   
+   
+  Task 1
+
+Firstly some stock price data is required. The fist function gets Yahoo(https://finance.yahoo.com/) stock symbols and returns yearly price data. And then the second function turns price data into return data so if some stock prices were loaded from say .xlsx file one still would be able to obtain yearly returns and proceed with the tasks if the file data contains columns of prices (any type) for different stocks.
+
+Yearly data was chosen so that returns are not volatile as daily and monthly ones.
+
+The process is as follows:
+1) Get company names (simply inputed in a vector)
+2) Get price data for 40 years
+3) Turn to yearly data
+4) Get returns for all used companies
+
+
+[[As asked in the task itself the assumption here is that dividends don't exist or are insignificant for stock performance. For the whole task a required assumption is that all required information is available to all investors]]
+
+This chunk gets data from the web service. The next could get it loaded from a directory.
+```{r}
+# rtsdata::ds.getSymbol.yahoo() (used to get stock prices. Internet connection required)
+
+cmpnyvec <- c("IBM", "CSCO")
+
+
+yearlypricedf <- function(names, startdate = Sys.Date() - 10*366 - 30*365, enddate = Sys.Date()){
+
+  ### Input - character vector of stock symbols as displayed in Yahoo finance, start date and end date for the data. Output - xts object with yearly prices of the stocks
+  
+  stockdata <- xts()
+  
+  for (i in names){
+    stock <- ds.getSymbol.yahoo(i, from = startdate, to = enddate) # a simple aproximation of 40 year period used for the starting point 
+    stock <- to.yearly(stock)[, 6]
+    names(stock) <- i
+    if (length(na.omit(stock)) < 10){
+      print("Warning, data is less than 10 years")
+    }
+    stockdata <- merge(stockdata, stock)
+  }
+  return(stockdata)
+}
+
+stockdata <- yearlypricedf(cmpnyvec) #xtc of stock prices
+
+```
+
+To get preloaded data use this chunk:
+```{r}
+# xlsx::read.xlsx() to get stock prices
+
+stockdataMain <- read.xlsx("StockPrices.xlsx", sheetIndex = 1)
+rownames(stockdataMain) <- stockdataMain[, 1]
+stockdataMain <- stockdataMain[, -1]
+stockdataMain <- as.xts(stockdataMain)
+stockdata <- stockdataMain[, 1:2]
+
+```
+
+
+Turning price to returns:
+```{r}
+pricestoreturns <- function(stdata){
+  
+  ### input an xts object with stock prices, returns xts object with returns for all peiods in input except the first one as it requires the previous period price
+  
+  for (i in names(stdata)){
+    tempvar <- as.numeric(stdata[1:(length(stdata[, i])-1), i])
+    tempvar <- append(c(NA), tempvar)
+    stdata[, i] <- (stdata[, i] - tempvar)/tempvar
+  }
+  stdata <- stdata[-1, ]
+  return(stdata)
+}
+
+stockdata <- pricestoreturns(stockdata) # overwrites xts of prices with xts of returns. Not going to be overwritten again
+print(head(stockdata))
+print(tail(stockdata))
+```
+
+For most chunks the data or its portion is printed out to see if the result is more or less consistent with expectations. 
+
+
+
+The data is aquired. Now to proceed calculating means of each stock and covariance matrix. So portfolios can be constructed later on.
+
+
+```{r}
+
+stparams <- list("means" = c(), "covmat" = matrix()) # list of parameters of different stocks. 
+
+
+assetparams <- function(stdata){
+  
+  ### input xts of stock returns. Returns list with vector of means and a covariance matrix
+  
+  stmeans <- colMeans(stdata, na.rm = TRUE)
+  stcovm <- cov(stdata, use = "pairwise.complete.obs")
+  return(list("means" = stmeans, "covmat" = stcovm))
+}
+
+stparams <- assetparams(stockdata) # Stock average returns and covariance matrix. Updated along the way with betas and CAPM predictions
+print(stparams)
+```
+
+
+
+
+The parameters of stocks are aquired. Next step is plotting the portfolios. Weghts of risk efficient portfolios are found using quadratic programming:
+
+Solving: 
+\[\min\limits_{w_1, \dots, w_n}(-m^tw + \frac{1}{2}*w^tCw);\]
+where m - vector of means of stocks multiplied by some number j, w - vector of weights, C - covariance matrix.
+
+Subject to:
+\[A^tw~~~V~~~c;\]
+
+Where w is the same vector of weitghts and for a case with short selling allowed:
+\[A = 
+\begin{pmatrix}
+1 \\
+1 \\
+\vdots \\
+1
+\end{pmatrix}
+~~~~~~c = 1~~~~~~V~is~"=";\]
+
+
+or for a case where short selling is prohibited:
+\[A = 
+\begin{pmatrix}
+1 & 1 & 0 & \dots & 0\\
+1 & 0 & 1 & \dots & 0\\
+\vdots & \vdots & \vdots & \ddots & \vdots\\
+1 & 0 & 0 & \dots & 1
+\end{pmatrix}
+~~~~~~c=
+\begin{pmatrix}
+1 \\
+0 \\
+\vdots \\
+0
+\end{pmatrix}
+~~~~~~V = 
+\begin{pmatrix}
+"=" \\
+"\geq" \\
+\vdots \\
+"\geq"
+\end{pmatrix}
+\]
+
+
+solve.QP allows to make an equality constraint so the first constraint should be binding as sum of portfolio weights is one and in case of no short selling there are other constraints which should be inequality ones so that $\sum_{i=1}^{n} w_i = 1$ in both cases and in case of no short selling $w_i \geq 0~~~\forall i$. Iterating through j gets portfolio weigths that minimise portfolio variance (and standard deviation) for different values of expected return. The resulting portfolios can then be plotted.
+
+
+[[One assumption is added at that point is that the stocks used are highly divisible so that all portfolios used are possible to construct.]]
+
+
+```{r}
+# quadprog::solve.QP() (used to get weights that construct portfolios on the efficient frontier using quadratic programming)
+
+aSetOfPortf <- function(stmeans, stcovm, lowerbuond, upperbound, increment, withShort = TRUE){
+  
+  ### input vector of means, covariance matrix, lower and upper bound and increment for multiple of d and logical value (TRUE for case with possibility to short-sell, FLASE otherwise). Output - dataframe where each row represents a portfolio on the efficient frontier with columns being expected return, standard deviation and weights of each stock. If one requires only the upper part of the frontier lower bound of 0 should provide the needed portfolios.
+  
+  dfout <- data.frame()
+  n <- length(stmeans)
+  b <- 1
+  A <- matrix(1, nrow = n)
+  if (!withShort){
+    b <- c(b, rep(0, n))
+    A <- cbind(1, diag(n))
+  }
+  j <- 1
+  for (i in seq(from=lowerbuond, to=upperbound, by=increment)){
+    d <- matrix(stmeans * i, ncol = n) 
+    sol <- solve.QP(stcovm, dvec=d, Amat=A, bvec=b, meq=1)$solution
+    dfout[j, "Er"] <- as.numeric(t(sol) %*% stmeans)
+    dfout[j, "Sigma"] <- as.numeric(sqrt(t(sol) %*% stcovm %*% sol))
+    for (q in 1:length(names(stmeans))){
+      coln <- paste("w", names(stmeans)[q])
+      dfout[j, coln] <- sol[q]
+    }
+    j <- j + 1
+  }
+  return(dfout)
+}
+portfparam <- aSetOfPortf(stparams$means, stparams$covmat, -5, 8, 0.01) # xts of efficient frontier portfolio parameters
+print(head(portfparam))
+print(tail(portfparam))
+```
+
+
+
+
+The efficient (minimum standard deviation for any expected return) portfolios are collected and now the efficient frontier can be plotted. The truly efficient frontier will be plotted for the next task.
+
+[[An assumption can be added that all agents are risk averse so for any given expected return they would construct a portfolio that minimises its risk(standard deviation) and thus the plotted graph will become the set of portfolios investors will choose (rationality will be added so they maximise return for any given level of risk. That case excludes portfolios with returns lower than minimum variance portfolio and is plotted after the next chunk of code - the one with CML). Also the agents are assumed to be price takers]]
+```{r}
+# ggplot2::(ggplot(), aes() and all geom_*()) (used to plot frontiers, lines, and points on expected return - standard deviation plane)
+
+
+plotTheRes <- function(ppar, mns, vrs){
+  
+  ### given parameters of portfolios (of the portfparams type), means and covariance matrix produces a plot of efficient frontier (here with the returns lower than return for minimum risk portfolio included)
+  
+  nodiv <- data.frame() # data table with mean and st dev of instruments <=> points on risk-return graph
+  for (i in 1:length(mns)){
+    nodiv[i, "Mean"] <- (mns[i])
+    nodiv[i, "St.dev"] <- sqrt(vrs[i, i])
+    rownames(nodiv)[i] <- names(mns)[i]
+  }
+  gg <- ggplot(ppar, mapping = aes(x = Er, y = Sigma)) +
+    geom_line(color = "blue", size = 1, alpha = 0.7) +
+    geom_point(data = nodiv, mapping = aes(x = Mean, y = St.dev), color = "red") + 
+    geom_text(data = nodiv ,mapping = aes(x = Mean, y = St.dev, 
+                                          label = rownames(nodiv)), hjust = 0, vjust = 1) +
+    coord_flip()
+  
+  return(list(gg, nodiv)) #nodiv part is not used anymore, but seems like it could be a useful output for other purposes
+}
+
+out <- plotTheRes(portfparam, stparams$means, stparams$covmat) # list of plot object and data frame with expected return and standard deviation of used efficient frontier portfolios
+out[[1]] <- out[[1]] + ylim(0, 3) + xlim(-0.1, 1) + 
+  geom_text(x = 1, y = 2.6, label = "EF", vjust = 1.5)
+print(out[[1]])
+```
+
+
+  Task 2
+
+Assume risk free rate is 0.0156 (taken from the yield of US treasury bill found on https://www.treasury.gov/resource-center/data-chart-center/interest-rates/Pages/TextView.aspx?data=yield for 01/17/20 <American format>). This rate is chosen as it is the government asset which is the closest to truly risk free asset and one year bill is chosen so that maturity coinsides with chosen return periods. Slope of the CML is the maximum Sharpe ratio and Sharpe ratio is $\frac{Er - r_f}{\sigma}$ for any portfolio. The chunk below will output both the graphs and maximum Sharpe ratio so CML function can be constructed. The efficient frontier here is the one that depicts both risk-averse and rational agents unlike the one above.
+
+[[As mentioned above risk free is 0.0156. Also investors can borrow any amount of money at that rate and reinvest it into the assets specified at the start. The assumption of rationality is added here]]
+```{r}
+# ggplot2:: (same as before)
+
+
+PlotCML <- function(ppar, stp, rf=0.0156){
+  
+  ### input portfolio parameters xts, stock parameters and risk free rate, output efficient frontier plot with CML and tangent portfolio (not through algebraic calculation so many points should be supplied to achieve accuracy)
+  
+  ppar$Sharpe <- (ppar$Er - rf)/ppar$Sigma
+  RP <- max(ppar$Sharpe)
+  #Er = rf + RP*Sigma
+  Pm <- which.min(ppar$Sigma)
+  EF <- ppar[ppar[, "Er"] >= ppar[Pm, "Er"], ] #removed lower part as rational investors would not hold such portfolios
+  plotout <- plotTheRes(EF, stp[[1]], stp[[2]])[[1]]
+  lindta <- data.frame(matrix(c(rf, max(ppar[, "Er"]), 0, (max(ppar[, "Er"]) - rf)/RP), 
+                              nrow = 2))
+  colnames(lindta) <- c("R", "S")
+  plotout <- plotout + geom_line(data = lindta, 
+                                 mapping = aes(x = R, y = S), color = "red", size = 0.7) + 
+    geom_point(aes(x = ppar$Er[which.max(ppar$Sharpe)], 
+                   y = ppar$Sigma[which.max(ppar$Sharpe)])) +
+    geom_text(aes(x = ppar$Er[which.max(ppar$Sharpe)], 
+                   y = ppar$Sigma[which.max(ppar$Sharpe)]), 
+              label = "Tangent portfolio", hjust = -0.125, vjust = 1, color = "black")
+  plotout$layers[[3]] <- NULL
+  plotout$layers[[2]] <- NULL
+  return(list(plotout, RP))
+}
+
+rp <- PlotCML(portfparam, stparams, 0.0156)
+rp[[1]] + geom_text(x = 1, y = 2.6, label = "EF", vjust = 1.5) +
+  geom_text(x = 1, y = 1.6, label = "CML", vjust = 1.5)
+print(rp[[2]])
+```
+
+
+Maximum Sharpe ratio for given problem is printed in console and is `r round(rp[[2]], 3)`. Now the CML equation is:
+Er(portfolio) = 0.0156 + `r round(rp[[2]], 3)`*$\sigma$(portfolio)
+Under the stated rationality assumptions now the investors choose the tangent portfolio and risk free assets in some propotion depending on preferences and thus get a portfolio lying on the CML line.
+
+
+  Task 3
+      
+      
+Market proxy was chosen to be S&P 500 as it is one of the most used indeces and compared with for example Dow Jones Industrial it represents the whole market better as is comprised of more diversified portfolio. Beta is then calculated for each stock as covariance between market and an asset over variance of the market. Finally some tests are conducted: t-test for equality of means and linear regression. For the first part the latter is useless as given any two points a line can be perfectly fit between them, but for multiple assets it will be of use.
+
+
+[[S&P 500 is a proxy of the market portfolio which under stated assumptions should be market weigthed portfolio of all available assets as everyone invests in market portfolio or in risk free and thus in an equilibrium the market will be the stated portfolio]]
+```{r}
+#library(rtsdata) (same as before)
+
+
+addBetas <- function(mrkt, stdta, stp, rf = 0.0156, web = TRUE){
+  
+  # input character for market as in yahoo finance, stock return data, stock parameters(will output them modified) to get stock parameters with stock betas as a third entry and yearly returns of market proxy. Use web = TRUE to get the market data from the web server, or web = FALSE to get it from the previously read xlsx file
+  
+  if (web){
+    mrkt <- ds.getSymbol.yahoo(mrkt, from = (Sys.Date() - 30*365 - 10*366), to = Sys.Date())
+    mrkt <- mrkt[, 6]
+    mrkt <- to.yearly(mrkt)[, 4]
+  }else{
+    mrkt <- stockdataMain[,dim(stockdataMain)[2]]
+  }
+  mrkt <- pricestoreturns(mrkt)
+  
+  stdta$market <- mrkt
+  mcov <- cov(stdta, use = "pairwise.complete.obs")
+  mcov <- mcov[, "market"]
+  stp$betas <- c(NA)
+  for (i in 1:(length(mcov)-1)){
+    stp$betas[i] <- mcov[i]/mcov[length(mcov)]
+  }
+  mrkt <- mean(mrkt, na.rm = TRUE) - rf
+  return(list(stp, mrkt))
+}
+
+stparams <- addBetas("^GSPC", stockdata, stparams, 0.0156)
+MRP <- stparams[[2]]
+stparams <- stparams[[1]]
+
+
+checkSML <- function(stmn, stbet, mrp, rf = 0.0156){
+  
+  ### input stock means, betas, market risk premium and risk free rate to get comparison of CAPM results with actual data in the form of list of length 4 with p-value of test for mean of difference between actual and CAPM results being 0, regression object, vector of CAPM expected returns and plot of regression
+  
+  ster <- stbet*mrp + rf
+  test <- t.test(ster, stmn, paired = TRUE)
+  test <- test[[3]]
+  regr <- lm(stmn ~ stbet)
+  dft <- matrix(c(stmn, stbet, ster), ncol = 3)
+  dft <- data.frame(stmn, stbet, ster)
+  colnames(dft) <- c("Mean_returns", "Beta", "SML")
+  plt <- ggplot(data = dft, aes(x = Beta)) + 
+    geom_point(aes(x = Beta, y = Mean_returns, color = "Mean_returns")) + 
+    geom_line(mapping = aes(x = Beta, y = SML, color = "SML")) +
+    geom_abline(intercept = regr$coefficients[[1]], slope = regr$coefficients[[2]], color = "blue") +
+    scale_colour_manual("", breaks = c("Mean_returns", "SML", "regression"),
+                      values = c("red", "black", "blue")) + 
+    ylab("Expected return")
+  return(list(test, regr, ster, plt))
+}
+
+a <- checkSML(stparams$means, stparams$betas, MRP, 0.0156)
+print(a[[1]])
+print(summary(a[[2]]))
+print(a[[4]])
+stparams$Er <- a[[3]]
+
+```
+
+
+For the first part(from regression):
+Er = `r round(a[[2]]$coefficients[1], 3)` + `r round(a[[2]]$coefficients[2], 3)`*$\beta$
+For the theoretical values:
+Er = 0.0156 + `r round(MRP, 3)`*$\beta$
+
+For the tests:
+The regression does not mean much as there are only two points as for now and t-test `r a[[1]] #change text manually based on the value` for difference of CAPM expected returns and actual means gives a relatively high p-value and hypothesis of difference in means is not rejected even at 15% significance, so on the 2-stock data CAPM seems to work.
+
+
+
+
+  Part 2
+  
+  
+
+The assumptions are all the same for the same parts of the task as well as functions as they support multiple stock analysis.
+
+Task 1 
+
+Get yearly returns:
+```{r}
+cmpnyvec <- c("IBM", "CSCO", "INTC", "AMZN", "SBUX", "JNJ", "WMT", "GS", "HD", "F", "KO")
+stockdata <- xts()
+
+
+
+stockdata <- yearlypricedf(cmpnyvec)
+```
+
+OR using preloaded data
+```{r}
+stockdata <- stockdataMain[, 1:(dim(stockdataMain)[2]-1)]
+```
+
+
+```{r}
+stockdata <- pricestoreturns(stockdata)
+print(head(stockdata))
+print(tail(stockdata))
+```
+
+
+Get means and covariance matrix
+```{r}
+stparams <- assetparams(stockdata)
+print(stparams)
+```
+
+
+
+
+Get variance efficient weights and plot the portfolios:
+```{r}
+portfparam <- aSetOfPortf(stparams$means, stparams$covmat, -5, 5, 0.1)
+out <- plotTheRes(portfparam, stparams$means, stparams$covmat)
+out[[1]] <- out[[1]] + ylim(0, 3) + 
+  xlim(-0.5, 2) + geom_text(x = 2, y = 2.3, label = "EF", vjust = 1.6)
+out[[1]]$layers[[3]] <- NULL
+print(out[[1]])
+
+```
+
+
+Removed the asset names due to too many of them being displayed and cluttering the plot.
+
+      Task 2
+
+
+Plot risk efficient frontier and get maximum Sharpe ratio:
+```{r}
+rp <- PlotCML(portfparam, stparams) 
+rp[[1]] + 
+  geom_text(x = 3.2, y = 4, label = "EF") + 
+  geom_text(x = 3.2, y = 3, label = "CML")
+print(rp[[2]])
+
+```
+
+
+The equation is Er = 0.0156 + `r round(rp[[2]], 3)`*st.dev
+
+
+      Task 3
+
+
+
+Add betas to the parameters and get market risk premium:
+```{r}
+stparams <- addBetas("^GSPC", stockdata, stparams, web = T)
+MRP <- stparams[[2]]
+stparams <- stparams[[1]]
+```
+
+
+
+Conduct the tests and evaluate the relationship:
+```{r}
+tst <- checkSML(stparams$means, stparams$betas, MRP)
+print(tst[[1]])
+print(summary(tst[[2]]))
+stparams$Er <- tst[[3]]
+print(tst[[4]])
+```
+
+
+CAPM:
+Er = 0.0156 + `r round(MRP, 3)`*$\beta$
+regression:
+Er = `r round(tst[[2]]$coefficients[1], 3)` + `r round(tst[[2]]$coefficients[2], 3)`*$\beta$
+
+The t-test returned a very high p-value of `r tst[[1]]` so hypothesis of equality of means is rejected at a very low significance level. The regression slope coefficient as well as the whole regression turned out to be significant as well with p-values of 0.002 but slightly different values from the market risk premium of Dow Jones index. So one can conclude that there is most likely some linear relation between betas and returns of stocks, but it is unlikely to be the usual (return of the market portfolio minus risk-free rate) or the market proxy chosen is closely correlated with the true market but has significantly different returns.
+
+
+
+
+Note: the blue lines are the regression lines. I just didn't manage to add the proper legend for them.
+
+
+
+
+
+
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+#download the data so xlsx can be provided as asked
+library(xlsx)
+cmpnyvec <- append(cmpnyvec, "^GSPC")
+dwnld <- yearlypricedf(cmpnyvec)
+write.xlsx(as.data.frame(dwnld),"StockPrices.xlsx")
+dddd <- read.xlsx("StockPrices.xlsx", sheetIndex = 1)
+rownames(dddd) <- dddd[, 1]
+dddd <- dddd[, -1]
+dd <- as.xts(dddd)
+stockdata <- dddd
+```
+
+
+
+
+
+
+
